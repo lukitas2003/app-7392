@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Claves">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Mi Gestor de Claves</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:#0f172a;color:#e2e8f0;font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+#app{max-width:520px;margin:0 auto;padding:16px}
+h1{font-size:1.3rem;margin:0}
+p{color:#94a3b8;margin:.5rem 0 1rem}
+.muted{color:#94a3b8;font-size:.9rem}
+input,textarea,select{width:100%;padding:13px;margin:6px 0;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font:inherit;font-size:16px}
+input:focus,textarea:focus,select:focus{outline:2px solid #38bdf8;border-color:transparent}
+.btn{width:100%;padding:13px;margin:6px 0;border:0;border-radius:10px;background:#0ea5e9;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.btn.sec{background:#334155}.btn.danger{background:#b91c1c}
+.btn:active{opacity:.8}
+.card{margin-top:8vh}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.ic{background:#1e293b;border:0;color:#e2e8f0;font-size:1.25rem;border-radius:10px;width:44px;height:44px;margin-left:6px;cursor:pointer}
+.item{background:#1e293b;border-radius:12px;margin:10px 0;padding:6px 14px}
+.folder{background:#172554}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0}
+.row .btn{margin:0}
+.head{cursor:pointer}
+.val{word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:.95rem}
+.mini{background:#334155;border:0;color:#e2e8f0;padding:9px 12px;border-radius:8px;font:inherit;font-size:.85rem;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block}
+.pw{position:relative}
+.pw input{padding-right:52px}
+.eye{position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:0;font-size:1.2rem;width:46px;height:46px;cursor:pointer;color:inherit}
+.notes{background:#0f172a;border-radius:8px;padding:10px;margin:6px 0;white-space:pre-wrap;color:#cbd5e1;font-size:.9rem}
+.warn{background:#422006;color:#fed7aa;padding:10px 12px;border-radius:10px;font-size:.9rem;margin:10px 0}
+.sep{height:1px;background:#334155;margin:16px 0}
+.crumbs{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:4px 0 8px;font-size:.95rem}
+.crumbs a{color:#38bdf8;cursor:pointer;padding:4px 2px}
+.crumbs span.cur{color:#e2e8f0;font-weight:600;padding:4px 2px}
+.crumbs i{color:#64748b;font-style:normal}
+#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#f1f5f9;color:#0f172a;padding:10px 16px;border-radius:999px;font-size:.9rem;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90%;text-align:center}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast"></div>
+<script>
+'use strict';
+const KEY = 'gestor_vault_v1', LK = 'gestor_last_export', ITER = 600000;
+const enc = new TextEncoder(), dec = new TextDecoder();
+let key = null, salt = null, iter = ITER, items = [], groups = [];
+let view = localStorage.getItem(KEY) ? 'unlock' : 'setup';
+let cur = null;                       // carpeta actual (null = raíz)
+let editing = null, editingG = null, expanded = null, shown = false, query = '', pendingText = '';
+let timer = null, hiddenAt = 0, cbTimer = null, toastTimer = null;
+
+/* ---------- utilidades ---------- */
+function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const k in attrs) {
+    if (k.startsWith('on')) e.addEventListener(k.slice(2), attrs[k]);
+    else if (k === 'class') e.className = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  }
+  for (const x of kids.flat()) if (x != null && x !== false) e.append(x.nodeType ? x : document.createTextNode(x));
+  return e;
+}
+const b64 = u => { let s = ''; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode.apply(null, u.subarray(i, i + 8192)); return btoa(s); };
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const byName = (a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2500);
+}
+async function copy(text, msg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(msg + ' (se borra en 30 s)');
+    clearTimeout(cbTimer);
+    cbTimer = setTimeout(() => navigator.clipboard.writeText('').catch(() => {}), 30000);
+  } catch { toast('No se pudo copiar'); }
+}
+function gen(n = 20) {
+  const cs = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*?-_';
+  const lim = 256 - (256 % cs.length), out = [];
+  while (out.length < n) {
+    for (const x of crypto.getRandomValues(new Uint8Array(n))) if (x < lim && out.length < n) out.push(cs[x % cs.length]);
+  }
+  return out.join('');
+}
+function pwBox(attrs) {
+  const i = h('input', { type: 'password', ...attrs });
+  const b = h('button', { type: 'button', class: 'eye', 'aria-label': 'Mostrar u ocultar contraseña' }, '👁');
+  const w = h('div', { class: 'pw' }, i, b);
+  const show = v => { i.type = v ? 'text' : 'password'; b.textContent = v ? '🙈' : '👁'; };
+  b.addEventListener('click', () => show(i.type === 'password'));
+  Object.defineProperty(w, 'value', { get: () => i.value, set: v => { i.value = v; } });
+  w.show = show;
+  return w;
+}
+function fixUrl(u) {
+  u = (u || '').trim(); if (!u) return '';
+  return /^https?:\/\//i.test(u) ? u : 'https://' + u;
+}
+
+/* ---------- carpetas ---------- */
+const gById = id => groups.find(g => g.id === id);
+const kidsOf = pid => groups.filter(g => (g.parent || null) === pid).sort(byName);
+function allIds(id) { const r = [id]; for (const k of kidsOf(id)) r.push(...allIds(k.id)); return r; }
+const countIn = id => { const ids = allIds(id); return items.filter(i => ids.includes(i.group)).length; };
+function chain(id) { const p = []; let g = gById(id); while (g) { p.unshift(g); g = gById(g.parent); } return p; }
+const pathOf = id => chain(id).map(g => g.name).join(' / ');
+function flat(pid = null, d = 0) {
+  return kidsOf(pid).flatMap(g => [{ id: g.id, label: ' '.repeat(d) + '📁 ' + g.name }, ...flat(g.id, d + 1)]);
+}
+function go(id) { cur = id; expanded = null; shown = false; query = ''; view = 'list'; render(); }
+
+/* ---------- criptografía (AES-GCM + PBKDF2) ---------- */
+async function derive(pw, s, it) {
+  const m = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: s, iterations: it, hash: 'SHA-256' }, m,
+    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function seal() {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify({ groups, items })));
+  return { v: 2, iter, salt: b64(salt), iv: b64(iv), data: b64(new Uint8Array(ct)) };
+}
+async function save() { localStorage.setItem(KEY, JSON.stringify(await seal())); }
+async function openVault(pw, v) {
+  const s = unb64(v.salt), k = await derive(pw, s, v.iter);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(v.iv) }, k, unb64(v.data));
+  const d = JSON.parse(dec.decode(pt));
+  const data = Array.isArray(d) ? { groups: [], items: d } : { groups: d.groups || [], items: d.items || [] };
+  return { k, s, it: v.iter, data };
+}
+
+/* ---------- bloqueo automático ---------- */
+function bump() { clearTimeout(timer); if (key) timer = setTimeout(lock, 120000); }
+function lock() {
+  key = null; items = []; groups = []; cur = null; expanded = null; shown = false; query = ''; editing = null; editingG = null;
+  view = 'unlock'; render();
+}
+['click', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, bump, { passive: true }));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) hiddenAt = Date.now();
+  else if (key && Date.now() - hiddenAt > 60000) lock();
+});
+
+/* ---------- vistas ---------- */
+function render() {
+  const views = { setup: vSetup, unlock: vUnlock, list: vList, form: vForm, folder: vFolder, settings: vSettings, import: vImport };
+  document.getElementById('app').replaceChildren(views[view]());
+  if (view === 'list') drawList();
+  window.scrollTo(0, 0);
+}
+const back = () => h('button', { class: 'btn sec', onclick: () => { view = 'list'; render(); } }, 'Volver');
+
+function vSetup() {
+  const a = pwBox({ placeholder: 'Contraseña maestra (mín. 10 caracteres)', autocomplete: 'new-password' });
+  const b = pwBox({ placeholder: 'Repetí la contraseña maestra', autocomplete: 'new-password' });
+  const btn = h('button', { class: 'btn', onclick: async () => {
+    if (a.value.length < 10) return toast('Mínimo 10 caracteres');
+    if (a.value !== b.value) return toast('Las contraseñas no coinciden');
+    btn.textContent = 'Creando…'; btn.disabled = true;
+    salt = crypto.getRandomValues(new Uint8Array(16)); iter = ITER;
+    key = await derive(a.value, salt, iter); items = []; groups = []; cur = null;
+    await save(); bump(); view = 'list'; render();
+  } }, 'Crear bóveda');
+  return h('div', { class: 'card' },
+    h('h1', {}, '🔐 Creá tu bóveda'),
+    h('p', {}, 'Elegí una contraseña maestra larga que puedas recordar (una frase funciona muy bien). Es la única que vas a tener que memorizar.'),
+    a, b,
+    h('div', { class: 'warn' }, 'Si la olvidás, NO hay forma de recuperar tus datos. Nadie puede resetearla.'),
+    btn);
+}
+
+function vUnlock() {
+  const pw = pwBox({ placeholder: 'Contraseña maestra', autocomplete: 'current-password' });
+  const go2 = async () => {
+    try {
+      const r = await openVault(pw.value, JSON.parse(localStorage.getItem(KEY)));
+      key = r.k; salt = r.s; iter = r.it; items = r.data.items; groups = r.data.groups; cur = null;
+      bump(); view = 'list'; render();
+    } catch { toast('Contraseña incorrecta'); pw.value = ''; }
+  };
+  pw.addEventListener('keydown', e => { if (e.key === 'Enter') go2(); });
+  return h('div', { class: 'card' }, h('h1', {}, '🔒 Bóveda bloqueada'), h('p', {}, 'Ingresá tu contraseña maestra.'),
+    pw, h('button', { class: 'btn', onclick: go2 }, 'Desbloquear'));
+}
+
+function vList() {
+  if (cur && !gById(cur)) cur = null;
+  const s = h('input', { type: 'search', placeholder: 'Buscar en toda la bóveda…', value: query, oninput: e => { query = e.target.value; drawList(); } });
+  const last = Number(localStorage.getItem(LK) || 0);
+  const stale = !last ? 'Todavía no hiciste ningún respaldo. Andá a ⚙️ y exportá uno.'
+    : (Date.now() - last > 30 * 864e5 ? 'Tu último respaldo tiene más de 30 días.' : null);
+
+  const crumbs = h('div', { class: 'crumbs' });
+  const path = chain(cur);
+  crumbs.append(cur ? h('a', { onclick: () => go(null) }, '🏠 Inicio') : h('span', { class: 'cur' }, '🏠 Inicio'));
+  path.forEach((g, i) => {
+    crumbs.append(h('i', {}, '›'));
+    crumbs.append(i === path.length - 1 ? h('span', { class: 'cur' }, g.name) : h('a', { onclick: () => go(g.id) }, g.name));
+  });
+
+  return h('div', {},
+    h('div', { class: 'top' }, h('h1', {}, '🔐 Mis claves'),
+      h('div', {},
+        h('button', { class: 'ic', title: 'Nueva entrada', onclick: () => { editing = null; view = 'form'; render(); } }, '＋'),
+        h('button', { class: 'ic', title: 'Nueva carpeta', onclick: () => { editingG = null; view = 'folder'; render(); } }, '📁'),
+        h('button', { class: 'ic', title: 'Ajustes', onclick: () => { view = 'settings'; render(); } }, '⚙️'))),
+    crumbs,
+    cur ? h('div', { class: 'row' },
+      h('button', { class: 'mini', onclick: () => go((gById(cur) || {}).parent || null) }, '⬆ Subir'),
+      h('button', { class: 'mini', onclick: () => { editingG = gById(cur); view = 'folder'; render(); } }, '✏️ Editar carpeta')) : null,
+    s, items.length && stale ? h('div', { class: 'warn' }, stale) : null,
+    h('div', { id: 'list' }));
+}
+
+function drawList() {
+  const box = document.getElementById('list'); if (!box) return;
+  const q = query.trim().toLowerCase();
+  let nodes = [];
+  if (q) {
+    nodes = items.filter(i => (i.name + ' ' + i.user + ' ' + (i.url || '')).toLowerCase().includes(q)).sort(byName).map(i => card(i, true));
+    if (!nodes.length) nodes = [h('p', {}, 'Sin resultados.')];
+  } else {
+    nodes = [
+      ...kidsOf(cur).map(folderRow),
+      ...items.filter(i => (i.group || null) === cur).sort(byName).map(i => card(i, false))
+    ];
+    if (!nodes.length) nodes = [h('p', {}, cur ? 'Carpeta vacía.' : 'Todavía no guardaste nada. Tocá ＋ para una entrada o 📁 para una carpeta.')];
+  }
+  box.replaceChildren(...nodes);
+}
+
+function folderRow(g) {
+  return h('div', { class: 'item folder' },
+    h('div', { class: 'row head', onclick: () => go(g.id) },
+      h('div', {}, h('b', {}, '📁 ' + g.name), h('div', { class: 'muted' }, countIn(g.id) + ' entradas')),
+      h('span', {}, '›')));
+}
+
+function card(i, inSearch) {
+  const open = expanded === i.id;
+  const sub = [i.user, inSearch && i.group ? '📁 ' + pathOf(i.group) : null].filter(Boolean).join(' · ');
+  const c = h('div', { class: 'item' },
+    h('div', { class: 'row head', onclick: () => { expanded = open ? null : i.id; shown = false; drawList(); } },
+      h('div', {}, h('b', {}, i.name), h('div', { class: 'muted' }, sub)), h('span', {}, open ? '▲' : '▼')));
+  if (open) {
+    const url = fixUrl(i.url);
+    [
+      h('div', { class: 'row' }, h('div', {}, h('div', { class: 'muted' }, 'Usuario'), h('div', { class: 'val' }, i.user || '—')),
+        h('button', { class: 'mini', onclick: () => copy(i.user, 'Usuario copiado') }, 'Copiar')),
+      h('div', { class: 'row' }, h('div', {}, h('div', { class: 'muted' }, 'Contraseña'), h('div', { class: 'val' }, shown ? i.pass : '••••••••••')),
+        h('div', {},
+          h('button', { class: 'mini', onclick: () => { shown = !shown; drawList(); } }, shown ? 'Ocultar' : 'Ver'), ' ',
+          h('button', { class: 'mini', onclick: () => copy(i.pass, 'Contraseña copiada') }, 'Copiar'))),
+      url ? h('div', { class: 'row' }, h('div', {}, h('div', { class: 'muted' }, 'URL'), h('div', { class: 'val' }, i.url)),
+        h('a', { class: 'mini', href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Abrir')) : null,
+      i.notes ? h('div', { class: 'notes' }, i.notes) : null,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn sec', onclick: () => { editing = i; view = 'form'; render(); } }, 'Editar'),
+        h('button', { class: 'btn danger', onclick: async () => {
+          if (!confirm('¿Eliminar "' + i.name + '"?')) return;
+          items = items.filter(x => x.id !== i.id); expanded = null; await save(); drawList(); toast('Eliminada');
+        } }, 'Eliminar'))
+    ].forEach(x => x && c.append(x));
+  }
+  return c;
+}
+
+function folderSelect(selected, exclude = []) {
+  return h('select', {},
+    h('option', { value: '' }, '🏠 Inicio (raíz)'),
+    flat().filter(o => !exclude.includes(o.id)).map(o => h('option', { value: o.id, ...(o.id === selected ? { selected: '' } : {}) }, o.label)));
+}
+
+function vForm() {
+  const e = editing || { id: crypto.randomUUID(), name: '', user: '', pass: '', url: '', notes: '', group: cur };
+  const name = h('input', { placeholder: 'Título (ej: Gmail)', value: e.name, autocomplete: 'off' });
+  const user = h('input', { placeholder: 'Usuario o email', value: e.user, autocomplete: 'off', autocapitalize: 'off' });
+  const pass = pwBox({ placeholder: 'Contraseña', value: e.pass, autocomplete: 'off' });
+  const url = h('input', { placeholder: 'URL (opcional)', value: e.url || '', autocomplete: 'off', autocapitalize: 'off', inputmode: 'url' });
+  const sel = folderSelect(e.group || '');
+  const notes = h('textarea', { rows: '3', placeholder: 'Notas (opcional)' }, e.notes);
+  return h('div', {},
+    h('h1', {}, editing ? 'Editar entrada' : 'Nueva entrada'), name, user, pass,
+    h('button', { class: 'btn sec', onclick: () => { pass.value = gen(); pass.show(true); } }, '🎲 Generar contraseña segura'),
+    url, h('div', { class: 'muted' }, 'Carpeta'), sel, notes,
+    h('button', { class: 'btn', onclick: async () => {
+      if (!name.value.trim()) return toast('Poné un título');
+      const n = { id: e.id, name: name.value.trim(), user: user.value.trim(), pass: pass.value, url: url.value.trim(), notes: notes.value, group: sel.value || null };
+      items = editing ? items.map(x => x.id === e.id ? n : x) : [...items, n];
+      await save(); cur = n.group; expanded = n.id; shown = false; view = 'list'; render(); toast('Guardado');
+    } }, 'Guardar'),
+    back());
+}
+
+function vFolder() {
+  const g = editingG || { id: crypto.randomUUID(), name: '', parent: cur };
+  const name = h('input', { placeholder: 'Nombre de la carpeta', value: g.name, autocomplete: 'off' });
+  const sel = folderSelect(g.parent || '', editingG ? allIds(g.id) : []);
+  return h('div', {},
+    h('h1', {}, editingG ? 'Editar carpeta' : 'Nueva carpeta'), name,
+    h('div', { class: 'muted' }, 'Dentro de'), sel,
+    h('button', { class: 'btn', onclick: async () => {
+      if (!name.value.trim()) return toast('Poné un nombre');
+      const n = { id: g.id, name: name.value.trim(), parent: sel.value || null };
+      groups = editingG ? groups.map(x => x.id === g.id ? n : x) : [...groups, n];
+      await save(); view = 'list'; render(); toast('Carpeta guardada');
+    } }, 'Guardar'),
+    editingG ? h('button', { class: 'btn danger', onclick: async () => {
+      if (!confirm('¿Eliminar la carpeta "' + g.name + '"?\nSus entradas y subcarpetas pasan a la carpeta superior (no se borran).')) return;
+      const p = g.parent || null;
+      items = items.map(i => i.group === g.id ? { ...i, group: p } : i);
+      groups = groups.filter(x => x.id !== g.id).map(x => x.parent === g.id ? { ...x, parent: p } : x);
+      cur = p; await save(); view = 'list'; render(); toast('Carpeta eliminada');
+    } }, 'Eliminar carpeta') : null,
+    back());
+}
+
+async function exportBackup() {
+  const blob = new Blob([JSON.stringify(await seal(), null, 1)], { type: 'application/json' });
+  const fname = 'respaldo-claves-' + new Date().toISOString().slice(0, 10) + '.json';
+  const file = new File([blob], fname, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); localStorage.setItem(LK, Date.now()); toast('Respaldo guardado'); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = h('a', { href: URL.createObjectURL(blob), download: fname });
+  document.body.append(a); a.click(); a.remove();
+  localStorage.setItem(LK, Date.now()); toast('Respaldo descargado');
+}
+
+function vSettings() {
+  const file = h('input', { type: 'file', accept: '.json,application/json', style: 'display:none', onchange: async e => {
+    const f = e.target.files[0]; if (!f) return;
+    pendingText = await f.text(); view = 'import'; render();
+  } });
+  const np = pwBox({ placeholder: 'Nueva contraseña maestra (mín. 10)', autocomplete: 'new-password' });
+  const np2 = pwBox({ placeholder: 'Repetí la nueva', autocomplete: 'new-password' });
+  return h('div', {},
+    h('h1', {}, '⚙️ Ajustes'), h('p', {}, items.length + ' entradas en ' + groups.length + ' carpetas.'),
+    h('button', { class: 'btn', onclick: exportBackup }, '📤 Exportar respaldo cifrado'),
+    h('p', { class: 'muted' }, 'En iPhone se abre el menú de compartir: elegí "Guardar en Archivos" o enviátelo por mail. Sigue cifrado con tu contraseña maestra.'),
+    h('button', { class: 'btn sec', onclick: () => file.click() }, '📥 Importar respaldo'), file,
+    h('div', { class: 'sep' }),
+    h('b', {}, 'Cambiar contraseña maestra'), np, np2,
+    h('button', { class: 'btn sec', onclick: async () => {
+      if (np.value.length < 10) return toast('Mínimo 10 caracteres');
+      if (np.value !== np2.value) return toast('No coinciden');
+      salt = crypto.getRandomValues(new Uint8Array(16)); iter = ITER;
+      key = await derive(np.value, salt, iter); await save(); np.value = np2.value = ''; toast('Contraseña cambiada');
+    } }, 'Cambiar'),
+    h('div', { class: 'sep' }),
+    h('button', { class: 'btn sec', onclick: lock }, '🔒 Bloquear ahora'),
+    h('button', { class: 'btn danger', onclick: () => {
+      if (!confirm('Esto borra TODA la bóveda de este dispositivo. ¿Seguro?')) return;
+      if (!confirm('Última advertencia: no se puede deshacer (salvo que tengas un respaldo).')) return;
+      localStorage.removeItem(KEY); key = null; items = []; groups = []; cur = null; view = 'setup'; render();
+    } }, 'Borrar todo'),
+    back());
+}
+
+function vImport() {
+  const pw = pwBox({ placeholder: 'Contraseña maestra de esa copia', autocomplete: 'off' });
+  return h('div', { class: 'card' }, h('h1', {}, 'Importar respaldo'),
+    h('p', {}, 'Las carpetas y entradas del respaldo se suman a las que ya tenés (no se borra nada).'), pw,
+    h('button', { class: 'btn', onclick: async () => {
+      try {
+        const r = await openVault(pw.value, JSON.parse(pendingText)); let n = 0;
+        for (const g of r.data.groups) if (!groups.some(y => y.id === g.id)) groups.push(g);
+        for (const x of r.data.items) if (!items.some(y => y.id === x.id)) { items.push(x); n++; }
+        await save(); pendingText = ''; view = 'list'; render(); toast(n + ' entradas importadas');
+      } catch { toast('Archivo o contraseña incorrectos'); }
+    } }, 'Importar'),
+    h('button', { class: 'btn sec', onclick: () => { view = 'settings'; render(); } }, 'Cancelar'));
+}
+
+render();
+</script>
+</body>
+</html>
